@@ -4,6 +4,7 @@ from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import HTTPException
 import uvicorn
 
 # ── 1. Data model ──────────────────────────────────────────────────────────────
@@ -11,6 +12,7 @@ FileInfo = namedtuple(
     "FileInfo",
     ["path", "size", "parent_dir", "file_type", "size_on_disk", "created", "accessed"],
 )
+
 
 def _stat_file(path: Path, root: Path) -> FileInfo | None:
     try:
@@ -27,12 +29,15 @@ def _stat_file(path: Path, root: Path) -> FileInfo | None:
         accessed=datetime.datetime.fromtimestamp(st.st_atime).isoformat(),
     )
 
+
 def scan_directory_iter(root: Path, workers: int = 8):
     root = Path(root).expanduser()
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = []
-        for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
-            dirnames[:]  = [d for d in dirnames  if not d.startswith(".")]
+        for dirpath, dirnames, filenames in os.walk(
+            root, topdown=True, followlinks=False
+        ):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
             filenames[:] = [f for f in filenames if not f.startswith(".")]
             base = Path(dirpath)
             for name in filenames:
@@ -44,15 +49,27 @@ def scan_directory_iter(root: Path, workers: int = 8):
             if info := fut.result():
                 yield info
 
+
 # ── 2. FastAPI app ─────────────────────────────────────────────────────────────
 app = FastAPI()
 
+
 @app.get("/")
 async def root():
-    return {
-        "status": "ok",
-        "ws_endpoint": "/ws"
-    }
+    return {"status": "ok", "ws_endpoint": "/ws"}
+
+
+@app.get("/folders")
+async def list_folders(base: str = "."):
+    """Return immediate subfolders of the given base directory."""
+    base_path = Path(base).expanduser()
+    if not base_path.is_dir():
+        raise HTTPException(status_code=404, detail=f"Invalid directory: {base}")
+    folders = [
+        str(p) for p in base_path.iterdir() if p.is_dir() and not p.name.startswith(".")
+    ]
+    return {"base": str(base_path), "folders": folders}
+
 
 @app.websocket("/ws")
 async def crawl_ws(ws: WebSocket, workers: int = 8):
@@ -62,7 +79,9 @@ async def crawl_ws(ws: WebSocket, workers: int = 8):
         msg = await ws.receive_text()
         data = json.loads(msg)
         if data.get("type") != "start" or "root" not in data:
-            await ws.send_text(json.dumps({"error": "Expected message of type 'start' with 'root'"}))
+            await ws.send_text(
+                json.dumps({"error": "Expected message of type 'start' with 'root'"})
+            )
             await ws.close(code=1003)
             return
 
@@ -82,6 +101,7 @@ async def crawl_ws(ws: WebSocket, workers: int = 8):
     except Exception as e:
         await ws.send_text(json.dumps({"error": str(e)}))
         await ws.close(code=1011)
+
 
 # ── 3. Run app ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
