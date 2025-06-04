@@ -11,12 +11,25 @@ import * as d3 from "d3";
         venv\Scripts\activate
         pip install -r requirements.txt
     
+    -> Run the server:
+        run the server uvicorn command in the terminal:
+        uvicorn file_graph_server:app --reload
+        
+        python file_graph_server.py
+        
+
 
 TO DO:
 
-- [ ] Add a button to toggle between "show all files" and "show only selected folder"
+- [ ] Add a button to toggle between "show all files" and "show only children" 
+      //this will only display the children of the selected node and the node itself
 - [ ] Add a button to toggle between show files and show folders
+      //this will allow the user to see only the folders or files in the graph sized with the aggregate size of the files in the folder
 - [ ] add a slider for adjesting size of nodes
+      //this will allow the user to adjust the size of all of the nodes in the graph
+      //this will be a global setting and not a per node setting and will be a multiplier for the size of the node
+
+
 - [ ] add file statistics menu
 - [ ] create modal for file statistics as well as errors
 - [ ] fix population of nodes from top left corner
@@ -53,6 +66,42 @@ export default function FileGraph() {
     ws.onclose = ev => setOutputMessage(ev.wasClean ? "WebSocket closed" : "WebSocket lost");
     return () => ws.close();
   }, []);
+
+  /*─────────────────────────────────────────────────────────
+    * 1.5 Output message
+    *────────────────────────────────────────────────────────*/
+useEffect(() => {
+  const ws = new WebSocket("ws://localhost:8000/ws");
+  ws.onopen = () => {
+    setOutputMessage("WebSocket connected");
+
+    // 🔧 HARDCODED PATH (change this to a valid folder on your machine)
+    const hardcodedRoot = "C:/Users/EvanT/Desktop/YourFolder";
+
+    ws.send(JSON.stringify({
+      type: "start",
+      root: hardcodedRoot
+    }));
+  };
+
+  ws.onmessage = (e) => {
+    const info = JSON.parse(e.data);
+    if (info.error) {
+      setOutputMessage(`Error: ${info.error}`);
+      return;
+    }
+
+    setRawFiles(prev => ({ ...prev, [info.path]: info }));
+    setNodes(prev => [...prev, info]);
+  };
+
+  ws.onerror = () => setOutputMessage("WebSocket error");
+  ws.onclose = ev =>
+    setOutputMessage(ev.wasClean ? "WebSocket closed" : "WebSocket lost");
+
+  return () => ws.close();
+}, []);
+
 
   /*─────────────────────────────────────────────────────────
    * 2. Build graph + render with D3

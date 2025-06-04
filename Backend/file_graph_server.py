@@ -37,58 +37,52 @@ def scan_directory_iter(root: Path, workers: int = 8):
             base = Path(dirpath)
             for name in filenames:
                 full = base / name
-                if full.is_symlink(): continue
+                if full.is_symlink():
+                    continue
                 futures.append(ex.submit(_stat_file, full, root))
         for fut in as_completed(futures):
             if info := fut.result():
                 yield info
 
-# ── 2. Directory picker ─────────────────────────────────────────────────────────
-def pick_directory_interactive(default: str | None = None) -> Path:
-    default = Path(default or Path.home()).expanduser()
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk(); root.withdraw()
-        chosen = filedialog.askdirectory(initialdir=default,
-                                         title="Select directory to crawl")
-        root.destroy()
-        if chosen:
-            return Path(chosen)
-    except Exception:
-        pass
-
-    # CLI fallback
-    while True:
-        txt = input(f"Directory to crawl [{default}]: ").strip() or str(default)
-        p = Path(txt).expanduser()
-        if p.is_dir():
-            return p
-        print(f"✖  '{txt}' is not a valid directory.")
-
-# ── 3. FastAPI app & state ───────────────────────────────────────────────────────
+# ── 2. FastAPI app ─────────────────────────────────────────────────────────────
 app = FastAPI()
-app.state.test_root = pick_directory_interactive()
 
 @app.get("/")
 async def root():
     return {
         "status": "ok",
-        "ws_endpoint": f"/ws?root={app.state.test_root}"
+        "ws_endpoint": "/ws"
     }
 
 @app.websocket("/ws")
-async def crawl_ws(ws: WebSocket, root: str | None = None, workers: int = 8):
+async def crawl_ws(ws: WebSocket, workers: int = 8):
     await ws.accept()
-    # if root not supplied by client, use our test_root
-    scan_root = Path(root or app.state.test_root)
     try:
+        # Wait for a message from the client specifying the root directory
+        msg = await ws.receive_text()
+        data = json.loads(msg)
+        if data.get("type") != "start" or "root" not in data:
+            await ws.send_text(json.dumps({"error": "Expected message of type 'start' with 'root'"}))
+            await ws.close(code=1003)
+            return
+
+        scan_root = Path(data["root"]).expanduser()
+        if not scan_root.exists() or not scan_root.is_dir():
+            await ws.send_text(json.dumps({"error": f"Invalid directory: {scan_root}"}))
+            await ws.close(code=1003)
+            return
+
+        # Stream file info
         for info in scan_directory_iter(scan_root, workers):
             await ws.send_text(json.dumps(info._asdict()))
         await ws.close(code=1000)
+
     except WebSocketDisconnect:
         return
+    except Exception as e:
+        await ws.send_text(json.dumps({"error": str(e)}))
+        await ws.close(code=1011)
 
+# ── 3. Run app ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # no root_path kwarg here!
     uvicorn.run("file_graph_server:app", host="0.0.0.0", port=8000, reload=True)
